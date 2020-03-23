@@ -1,9 +1,9 @@
 import sys
 import time
 import requests
-import configparser
+from configparser import ConfigParser
 from win32clipboard import *
-from PyQt5.QtGui import QPen, QPainter, QPixmap, QIcon, QKeySequence
+from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
 from ui.dialog import Ui_Dialog
@@ -12,8 +12,8 @@ from ui.mainwindow import Ui_MainWindow
 
 class Bbox(object):
     def __init__(self):
-        self._empty = True
-        self.init_bbox()
+        self._x1, self._y1 = 0, 0
+        self._x2, self._y2 = 0, 0
 
     @property
     def point1(self):
@@ -47,38 +47,42 @@ class Bbox(object):
             y_min, y_max = self._y2, self._y1
         return (x_min, y_min, x_max - x_min, y_max - y_min)
 
-    def is_empty(self):
-        return self._empty
-
-    def init_bbox(self):
-        self._x1 = 0
-        self._x2 = 0
-        self._y1 = 0
-        self._y2 = 0
-        self._empty = True
-
     def __str__(self):
         return str(self.bbox)
 
 
 class ScreenLabel(QLabel):
-    signal = pyqtSignal(QPixmap)
+    signal = pyqtSignal(QRect)
 
-    def __init__(self, pixmap):
+    def __init__(self):
         super().__init__()
         self._press_flag = False
         self._bbox = Bbox()
         self._pen = QPen(Qt.white, 2, Qt.DashLine)
         self._painter = QPainter()
         self._bbox = Bbox()
-        self._pixmap = pixmap
+        self._pixmap = QPixmap(width, height)
+        self._pixmap.fill(QColor(255, 255, 255))
+        self.setPixmap(self._pixmap)
+        self.setWindowOpacity(0.4)
+
+        self.setAttribute(Qt.WA_TranslucentBackground, True)  # 设置背景颜色为透明
+
+        QShortcut(QKeySequence("esc"), self, self.close)
+
+        self.setWindowFlag(Qt.Tool)  # 不然exec_执行退出后整个程序退出
+
+        # palette = QPalette()
+        # palette.
+        # self.setPalette()
 
     def _draw_bbox(self):
         pixmap = self._pixmap.copy()
         self._painter.begin(pixmap)
         self._painter.setPen(self._pen)  # 设置pen必须在begin后
         rect = QRect(*self._bbox.bbox)
-        self._painter.drawRect(rect)
+        self._painter.fillRect(rect, Qt.SolidPattern)  # 区域不透明
+        self._painter.drawRect(rect)  # 绘制虚线框
         self._painter.end()
         self.setPixmap(pixmap)
         self.update()
@@ -95,7 +99,7 @@ class ScreenLabel(QLabel):
             print("鼠标释放：", [QMouseEvent.x(), QMouseEvent.y()])
             self._bbox.point2 = [QMouseEvent.x(), QMouseEvent.y()]
             self._press_flag = False
-            self.signal.emit(self._pixmap.copy(*self._bbox.bbox))
+            self.signal.emit(QRect(*self._bbox.bbox))
 
     def mouseMoveEvent(self, QMouseEvent):
         if self._press_flag:
@@ -105,18 +109,20 @@ class ScreenLabel(QLabel):
 
 
 class ShotDialog(QDialog, Ui_Dialog):
-    def __init__(self, pixmap):
+    def __init__(self, rect):
         super().__init__()
         self.setupUi(self)
         self.adjustSize()
+        self.setWindowFlag(Qt.FramelessWindowHint)  # 没有窗口栏
+        # self.setAttribute(Qt.WA_TranslucentBackground)  # 设置背景透明
 
-        self.pushButton_clipboard.clicked.connect(self.clipboard)
-        self.pushButton_markdown.clicked.connect(self.markdown)
-        self.pushButton_save.clicked.connect(self.save)
+        self.pushButton_clipboard.clicked.connect(self.save_to_clipboard)
+        self.pushButton_markdown.clicked.connect(self.upload_to_picbed)
+        self.pushButton_save.clicked.connect(self.save_local)
         self.pushButton_cancel.clicked.connect(self.close)
 
-        self._pixmap = pixmap
-        self.label_shot.setPixmap(self._pixmap)
+        self.label_shot.setPixmap(QApplication.primaryScreen().grabWindow(0).copy(rect))
+        self.setWindowFlag(Qt.Tool)  # 不然exec_执行退出后整个程序退出
 
     def get_shot_img(self):
         return self.label_shot.pixmap().toImage()
@@ -129,7 +135,7 @@ class ShotDialog(QDialog, Ui_Dialog):
         shot_img.save(buffer, 'png')
         return shot_bytes.data()
 
-    def save(self):
+    def save_local(self):
         file, _ = QFileDialog.getSaveFileName(self, '保存到' './', 'screenshot.jpg',
                                               'Image files(*.jpg *.gif *.png)')
         if file:
@@ -137,7 +143,7 @@ class ShotDialog(QDialog, Ui_Dialog):
             shot_img.save(file)
         self.close()
 
-    def clipboard(self):
+    def save_to_clipboard(self):
         shot_bytes = self.get_shot_bytes()
         OpenClipboard()
         EmptyClipboard()
@@ -145,7 +151,7 @@ class ShotDialog(QDialog, Ui_Dialog):
         CloseClipboard()
         self.close()
 
-    def markdown(self):
+    def upload_to_picbed(self):
         shot_bytes = self.get_shot_bytes()
         filename = "shot" + str(time.time()).split('.')[0] + '.jpg'
         files = {
@@ -170,23 +176,26 @@ class ShotDialog(QDialog, Ui_Dialog):
         dialog.adjustSize()
         text = QLineEdit(message, dialog)
         text.adjustSize()
-        # 设置窗口的属性为ApplicationModal模态，用户只有关闭弹窗后，才能关闭主界面
-        dialog.setWindowModality(Qt.ApplicationModal)
         dialog.exec_()
 
 
 class Main(QMainWindow, Ui_MainWindow):
     def __init__(self):
         super().__init__()
+        self.adjustSize()
         self.setupUi(self)
         self.setWindowTitle("截图工具")
         self.setWindowIcon(QIcon('./icon/cut.png'))
         self.screen = QApplication.primaryScreen()
+        # 托盘行为
+        self.action_quit = QAction("退出", self, triggered=self.close)
+        self.action_show = QAction("主窗口", self, triggered=self.show)
+        self.menu_tray = QMenu(self)
+        self.menu_tray.addAction(self.action_quit)
         # 设置最小化托盘
-        self.screen = QApplication.primaryScreen()
         self.tray = QSystemTrayIcon(QIcon('./icon/screenshot.png'), self)  # 创建系统托盘对象
         self.tray.activated.connect(self.shot)  # 设置托盘点击事件处理函数
-        self.tray.show()
+        self.tray.setContextMenu(self.menu_tray)
         # 快捷键
         QShortcut(QKeySequence("F1"), self, self.shot)
         # 信号与槽
@@ -201,9 +210,16 @@ class Main(QMainWindow, Ui_MainWindow):
 
     def shot(self):
         """开始截图"""
-        pixmap = self.screen.grabWindow(0)
-        self.label = ScreenLabel(pixmap)
-        self.label.setPixmap(pixmap)
+        self.hide()
+        # time.sleep(0.2)  # 保证隐藏窗口
+        # pixmap = self.screen.grabWindow(0)
+        # painter = QPainter()
+        # painter.setOpacity(0.5)
+        # painter.begin(pixmap)
+        # painter.end()
+
+        self.label = ScreenLabel()
+        # self.label.setPixmap(pixmap)
         self.label.showFullScreen()
         self.label.signal.connect(self.callback)
 
@@ -211,8 +227,10 @@ class Main(QMainWindow, Ui_MainWindow):
         """截图完成回调函数"""
         self.label.close()
         del self.label  # del前必须先close
-        self.dialog = ShotDialog(pixmap)
-        self.dialog.exec_()
+        dialog = ShotDialog(pixmap)
+        dialog.exec_()
+        if not self.isMinimized():
+            self.show()  # 截图完成显示窗口
 
     def change_api(self):
         cfg.set('picbed', "api", self.lineEdit_api.text())
@@ -220,19 +238,29 @@ class Main(QMainWindow, Ui_MainWindow):
     def change_cookie(self):
         cfg.set('picbed', "cookie", self.lineEdit_cookie.text())
 
-    def close(self):
-        print("修改配置文件")
-        cfg.write(open("config.ini", "r+", encoding="utf-8"))
-        super().close()
+    def changeEvent(self, event):
+        if event.type() == QEvent.WindowStateChange and self.isMinimized():
+            self.tray.showMessage("通知", "已最小化到托盘，点击开始截图")
+            self.tray.show()
+            self.hide()
+
+    def closeEvent(self, event):
+        reply = QMessageBox.information(self, "消息", "是否退出程序", QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            event.accept()
+            print("修改配置文件")
+            cfg.write(open("config.ini", "r+", encoding="utf-8"))
+        else:
+            event.ignore()
 
 
 if __name__ == "__main__":
-    from configparser import ConfigParser
-
     cfg = ConfigParser()
     cfg.read('config.ini')
     cfg.get('picbed', 'cookie')
     app = QApplication(sys.argv)
     window = Main()
     window.show()
+    height = QApplication.desktop().screenGeometry().height()
+    width = QApplication.desktop().screenGeometry().width()
     sys.exit(app.exec_())
